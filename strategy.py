@@ -84,6 +84,10 @@ class MyTradingStrategy(AbstractTradingStrategy):
         # Quote on all available products
         for product in marketplace.get_products():
 
+            if current_sub_round < 6:
+                if product.id.split(",")[1] in ['C','P']:
+                    continue
+
             fair_value = self._calculate_fair_value(
                 product, expected_value_per_roll
             )
@@ -101,12 +105,14 @@ class MyTradingStrategy(AbstractTradingStrategy):
                 numeric_position = position.position
 
             if fair_value is not None:
-                # Create bid/ask spread around fair value
-
-                # Skew quotes to manage positions (sell if long, buy if short)
-                fair_value += (self.spread_width / 10) * (numeric_position * -1)
-
-                half_spread = self.spread_width / 2.0
+                if product.id.split(",")[1] in ['C','P']:
+                    half_spread = 10
+                else:
+                    # Create bid/ask spread around fair value
+                    # Skew quotes to manage positions (sell if long, buy if short)
+                    fair_value += (self.spread_width / 10) * (numeric_position * -1)
+                    half_spread = self.spread_width / 2.0
+                    
                 bid = max(0.1, fair_value - half_spread)
                 ask = fair_value + half_spread
 
