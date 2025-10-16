@@ -79,7 +79,7 @@ class MyTradingStrategy(AbstractTradingStrategy):
         quotes = {}
 
         current_sub_round = round_info.get("current_sub_round", 0)
-        self.spread_width = self._update_spread(current_sub_round)
+        self.spread_width = self._update_spread(training_rolls, current_rolls)
         
         # Quote on all available products
         for product in marketplace.get_products():
@@ -116,7 +116,7 @@ class MyTradingStrategy(AbstractTradingStrategy):
 
         return quotes
     
-    def _update_spread(self, current_sub_round: int, training_rolls, current_rolls) -> float:
+    def _update_spread(self, training_rolls, current_rolls) -> float:
         z_score = 1.645
         return z_score * self._calculate_standard_error_of_mean(training_rolls, current_rolls)
     
