@@ -41,14 +41,6 @@ from typing import Any, Dict, Tuple
 ## can also import other standard libraries as needed
 
 class MyTradingStrategy(AbstractTradingStrategy):
-    """
-    Example trading strategy implementation.
-    
-    This strategy:
-    1. Calculates expected dice values from historical data
-    2. Computes fair values for futures
-    3. Quotes bid/ask spreads around fair values
-    """
     
     def __init__(self):
         self.spread_width = 4.0  # Bid-ask spread width
@@ -63,12 +55,6 @@ class MyTradingStrategy(AbstractTradingStrategy):
     def make_market(self, *, marketplace: Any, training_rolls: Any, my_trades: Any, 
                    current_rolls: Any, round_info: Any) -> Dict[str, Tuple[float, float]]:
         """
-        This is the main method to be modifying, and will return a set of markets 
-        for each product (or no market if you do not want to make a market).
-
-        The method currently loops through each of the products, only making a market 
-        on the futures.
-        
         Parameters:
         - marketplace: Use marketplace.get_products() to access all tradeable products.
         - training_rolls: 2000 historical dice rolls for distribution analysis.
@@ -87,17 +73,16 @@ class MyTradingStrategy(AbstractTradingStrategy):
         """
         # Calculate expected value per dice roll from historical data
         expected_value_per_roll = self._calculate_expected_roll_value(
-            training_rolls, current_rolls
+            training_rolls, current_rolls, round_info.get("current_sub_round", 0)
         )
         
         quotes = {}
+
+        current_sub_round = round_info.get("current_sub_round", 0)
+        self.spread_width = self._update_spread(current_sub_round)
         
         # Quote on all available products
         for product in marketplace.get_products():
-
-            # Skip options for simplicity (remove this line to trade options)
-            if product.id.split(",")[1] in ['C','P']:
-                continue
 
             fair_value = self._calculate_fair_value(
                 product, expected_value_per_roll
@@ -110,8 +95,8 @@ class MyTradingStrategy(AbstractTradingStrategy):
             if position is not None:
                 # position.trades: list of trades, each has attributes buyer_id, seller_id, price, 
                 # round_traded, quantity (quantity is 1 if buying, -1 if selling)
-                trades = position.trades 
-                
+                trades = position.trades
+
                 # position.position: net position, positive if long, negative if short
                 numeric_position = position.position
 
@@ -119,21 +104,30 @@ class MyTradingStrategy(AbstractTradingStrategy):
                 # Create bid/ask spread around fair value
 
                 # Skew quotes to manage positions (sell if long, buy if short)
-                fair_value += self.spread_width/10*numeric_position
+                fair_value += (self.spread_width / 10) * (numeric_position * -1)
 
                 half_spread = self.spread_width / 2.0
                 bid = max(0.1, fair_value - half_spread)
                 ask = fair_value + half_spread
-                
+
+
                 # Add to quotes dictionary
                 quotes[product.id] = (bid, ask)
 
         return quotes
     
-    def _calculate_expected_roll_value(self, training_rolls, current_rolls) -> float:
+    def _update_spread(self, current_sub_round: int, training_rolls, current_rolls) -> float:
+        z_score = 1.28 + current_sub_round / 14
+        return z_score * self._calculate_standard_error_of_mean(training_rolls, current_rolls)
+    
+    def _calculate_expected_roll_value(self, training_rolls, current_rolls, current_sub_round: int) -> float:
         """Calculate expected value of a single dice roll."""
-        all_rolls = list(training_rolls) + list(current_rolls)
-        
+        if current_sub_round == 10:
+            all_rolls = list(current_rolls)
+
+        else:
+            all_rolls = list(training_rolls) + list(current_rolls)
+            
         if not all_rolls:
             # No data available, use theoretical expected value
             return (1 + self.dice_sides) / 2.0
@@ -174,6 +168,18 @@ class MyTradingStrategy(AbstractTradingStrategy):
             
         return None
     
+    def _calculate_standard_error_of_mean(self, training_rolls, current_rolls):
+        
+        all_rolls = list(training_rolls) + list(current_rolls)
+        
+        if not all_rolls:
+            # No data available, use approximate standard error of mean for discrete uniform distribution
+            return np.sqrt(len(all_rolls)) / 3.46
+        
+        # Calculate empirical standard error of mean
+        return np.std(all_rolls) / np.sqrt(len(all_rolls))
+        
+    
     def on_round_end(self, result: Dict[str, Any]) -> None:
         """Handle end of round printing for personal debugging."""
         pnl = result.get("pnl", 0.0)
@@ -185,3 +191,4 @@ class MyTradingStrategy(AbstractTradingStrategy):
         total_pnl = summary.get("total_pnl", 0.0)
         final_score = summary.get("final_score", 0.0)
         print(f"Game ended. Total PnL: ${total_pnl:.2f}, Score: {final_score:.1f}")
+    
