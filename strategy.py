@@ -38,24 +38,39 @@ DEBUGGING:
 from autograder.sdk.strategy_interface import AbstractTradingStrategy
 import numpy as np
 from typing import Any, Dict, Tuple
-from scipy.stats import norm
-## can also import other standard libraries as needed
+# can also import other standard libraries as needed
+
 
 class MyTradingStrategy(AbstractTradingStrategy):
-    
+    """
+    Example trading strategy implementation.
+
+    This strategy:
+    1. Calculates expected dice values from historical data
+    2. Computes fair values for futures
+    3. Quotes bid/ask spreads around fair values
+    """
+
     def __init__(self):
-        self.spread_width = 4.0  # Bid-ask spread width
+        self.spread_width = 100_000_000  # Bid-ask spread width
         self.dice_sides = 6      # Will be updated in on_game_start
-        
+
     def on_game_start(self, config: Dict[str, Any]) -> None:
         """Initialize strategy with game configuration."""
         self.dice_sides = config.get("dice_sides", 6)
         self.team_name = config.get("team_name", "Unknown")
-        print(f"Strategy {self.team_name} starting with {self.dice_sides}-sided dice")
-        
-    def make_market(self, *, marketplace: Any, training_rolls: Any, my_trades: Any, 
-                   current_rolls: Any, round_info: Any) -> Dict[str, Tuple[float, float]]:
+        print(
+            f"Strategy {self.team_name} starting with {self.dice_sides}-sided dice")
+
+    def make_market(self, *, marketplace: Any, training_rolls: Any, my_trades: Any,
+                    current_rolls: Any, round_info: Any) -> Dict[str, Tuple[float, float]]:
         """
+        This is the main method to be modifying, and will return a set of markets 
+        for each product (or no market if you do not want to make a market).
+
+        The method currently loops through each of the products, only making a market 
+        on the futures.
+
         Parameters:
         - marketplace: Use marketplace.get_products() to access all tradeable products.
         - training_rolls: 2000 historical dice rolls for distribution analysis.
@@ -69,142 +84,103 @@ class MyTradingStrategy(AbstractTradingStrategy):
         - round_info: A dictionary with the current round state.
             - round_info.get("current_sub_round", 0) gives the current sub-round number.
             - round_info.get("total_sub_rounds", 10) gives the total sub-rounds in the round.
-        
+
         Returns dict mapping product_id -> (bid_price, ask_price)
         """
+
+
         # Calculate expected value per dice roll from historical data
-
-        current_sub_round = round_info.get("current_sub_round", 0)
-
-        mean_roll, std_dev_roll = self._get_roll_distribution_params(
-            training_rolls, current_rolls, current_sub_round
+        expected_value_per_roll = self._calculate_expected_roll_value(
+            training_rolls, current_rolls
         )
 
-        if current_sub_round == 10:
-            expected_total_sum = np.sum(current_rolls)
-            std_dev_total_sum = 0.0
-            future_half_spread = 0.5
+        quotes = {}
 
-        else:
-            expected_total_sum = mean_roll * 20_000
-            rolls_remaining = 20_000 - (current_sub_round * 2_000)
-            std_dev_total_sum = np.sqrt(rolls_remaining) * std_dev_roll
-
-            z_score = 2.5
-            future_half_spread = max(1.0, z_score * std_dev_total_sum)
-            
-        quotes = dict()
-
+        # Quote on all available products
         for product in marketplace.get_products():
 
             fair_value = self._calculate_fair_value(
-                product, expected_total_sum, std_dev_total_sum
+                product, expected_value_per_roll
             )
 
-            if fair_value is None:
-                continue
+            if fair_value is not None:
 
-            product_type = product.id.split(",")[1]
+                # Create bid/ask spread around fair value
+                half_spread = self.spread_width / 2.0
+                bid = max(0.1, fair_value - half_spread)
+                ask = fair_value + half_spread
 
-            if product_type == "F":
-                half_spread = future_half_spread
+                # Add to quotes dictionary
 
-            elif product_type in {"C", "P"}:
-                half_spread = max(0.25, fair_value * 0.25)
-
-            else:
-                continue
-            # Get your current position in this product
-            position = my_trades.get_position(product.id)
-            numeric_position = 0
-
-            if position is not None:
-                numeric_position = position.position
-                
-            skew_per_unit = half_spread * 0.02
-            skew = skew_per_unit * (numeric_position * -1)
-
-            max_skew = half_spread * 0.9
-            skew = max(-max_skew, min(max_skew, skew))
-
-            skewed_fv = fair_value + skew
-
-            bid = max(0.1, skewed_fv - half_spread)
-            ask = skewed_fv + half_spread
-
-            quotes[product.id] = (bid, ask)
+                # Make market for futures around fair value
+                if product.id.split(",")[1] == "F":
+                    quotes[product.id] = (bid, ask)
+                    
+                # Short straddle the call and put options (i.e. simultaneously sell call options and put options)
+                elif (product.id.split(",")[1] == "C"):
+                    quotes[product.id] = (
+                        0.1, ask)
+                    
+                elif (product.id.split(",")[1] == "P"):
+                    quotes[product.id] = (
+                        0.1, ask)
+                    
 
         return quotes
-    
-    def _get_roll_distribution_params(self, training_rolls, current_rolls, current_sub_round: int) -> Tuple[float, float]:
-        if current_sub_round == 10:
-            all_rolls = list(current_rolls)
-        else:
-            all_rolls = list(training_rolls) + list(current_rolls)
-        
-        if not all_rolls:
-            mean = (1 + self.dice_sides) / 2.0
-            std_dev = np.sqrt(((self.dice_sides - 1 + 1) ** 2 - 1) / 12)
 
-            return mean, std_dev
-        
-        return np.mean(all_rolls), np.std(all_rolls)
-    
-    def _calculate_fair_value(self, product, expected_total_sum: float, std_dev_total_sum: float) -> float:
+    def _calculate_expected_roll_value(self, training_rolls, current_rolls) -> float:
+        """Calculate expected value of a single dice roll."""
+        all_rolls = list(training_rolls) + list(current_rolls)
+
+        if not all_rolls:
+            # No data available, use theoretical expected value
+            return (1 + self.dice_sides) / 2.0
+
+        # Calculate empirical expected value
+        return np.mean(all_rolls)
+
+    def _calculate_fair_value(self, product, expected_value_per_roll: float) -> float:
         """Calculate fair value for a product."""
         try:
             data = product.id.split(",")
-            product_type = data[1]
-            
-            if product_type == "F":  # Future
-                return expected_total_sum
-                
-            elif data[1] in {"C", "P"}:  # Options
-                strike_price = float(data[3])
-                
-                if product_type == "C":
-                    return self._price_call(
-                        S=expected_total_sum,
-                        K=strike_price,
-                        sigma=std_dev_total_sum
-                    )
-                
-                else:
-                    return self._price_put(
-                        S=expected_total_sum,
-                        K=strike_price,
-                        sigma=std_dev_total_sum
-                    )
-                
+
+            if data[1] == "F":  # Future
+                settlement_round = int(data[2])
+                # Future settles to sum of first settlement_round dice rolls
+                fair_value = expected_value_per_roll * settlement_round * 2_000
+                return fair_value
+
+            elif data[1] in ["C", "P"]:  # Options
+                strike_price = float(data[2])
+                expiry_round = int(data[3])
+
+                # Expected sum at expiry
+                expected_sum_at_expiry = expected_value_per_roll * expiry_round * 2_000
+
+                if data[1] == "C":  # Call option
+                    # Call value = max(0, expected_sum - strike)
+                    fair_value = max(0, expected_sum_at_expiry - strike_price)
+                else:  # Put option
+                    # Put value = max(0, strike - expected_sum)
+                    fair_value = max(0, strike_price - expected_sum_at_expiry)
+
+                return fair_value
+
         except (ValueError, IndexError):
             # Malformed product ID
             return None
-            
-        return None
-      
-    def _price_call(self, S: float, K: float, sigma: float) -> float:
-        if sigma == 0:
-            return max(0.0, S - K)
-        
-        d = (S - K) / sigma
-        return (S - K) * norm.cdf(d) + sigma * norm.pdf(d)
 
-    def _price_put(self, S: float, K: float, sigma: float) -> float:
-        if sigma == 0:
-            return max(0.0, K - S)
-            
-        d = (S - K) / sigma
-        return (K - S) * norm.cdf(-d) + sigma * norm.pdf(-d)
-    
+        return None
+
     def on_round_end(self, result: Dict[str, Any]) -> None:
         """Handle end of round printing for personal debugging."""
         pnl = result.get("pnl", 0.0)
         dice_rolls = result.get("dice_rolls", [])
         print(f"Round ended. PnL: ${pnl:.2f}, Dice: {dice_rolls[:10]}")
-        
+
     def on_game_end(self, summary: Dict[str, Any]) -> None:
         """Handle end of game debugging."""
         total_pnl = summary.get("total_pnl", 0.0)
         final_score = summary.get("final_score", 0.0)
-        print(f"Game ended. Total PnL: ${total_pnl:.2f}, Score: {final_score:.1f}")
-    
+        print(
+            f"Game ended. Total PnL: ${total_pnl:.2f}, Score: {final_score:.1f}")
