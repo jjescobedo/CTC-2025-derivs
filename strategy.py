@@ -38,6 +38,7 @@ DEBUGGING:
 from autograder.sdk.strategy_interface import AbstractTradingStrategy
 import numpy as np
 from typing import Any, Dict, Tuple
+from scipy.stats import norm
 ## can also import other standard libraries as needed
 
 class MyTradingStrategy(AbstractTradingStrategy):
@@ -72,119 +73,128 @@ class MyTradingStrategy(AbstractTradingStrategy):
         Returns dict mapping product_id -> (bid_price, ask_price)
         """
         # Calculate expected value per dice roll from historical data
-        expected_value_per_roll = self._calculate_expected_roll_value(
-            training_rolls, current_rolls, round_info.get("current_sub_round", 0)
-        )
-        
-        quotes = {}
 
         current_sub_round = round_info.get("current_sub_round", 0)
-        self.spread_width = self._update_spread(training_rolls, current_rolls)
-        
-        # Quote on all available products
+
+        mean_roll, std_dev_roll = self._get_roll_distribution_params(
+            training_rolls, current_rolls, current_sub_round
+        )
+
+        if current_sub_round == 10:
+            expected_total_sum = np.sum(current_rolls)
+            std_dev_total_sum = 0.0
+            future_half_spread = 0.5
+
+        else:
+            expected_total_sum = mean_roll * 20_000
+            rolls_remaining = 20_000 - (current_sub_round * 2_000)
+            std_dev_total_sum = np.sqrt(rolls_remaining) * std_dev_roll
+
+            z_score = 2.5
+            future_half_spread = max(1.0, z_score * std_dev_total_sum)
+            
+        quotes = dict()
+
         for product in marketplace.get_products():
 
-            if current_sub_round < 6:
-                if product.id.split(",")[1] in ['C','P']:
-                    continue
-
             fair_value = self._calculate_fair_value(
-                product, expected_value_per_roll
+                product, expected_total_sum, std_dev_total_sum
             )
-            
+
+            if fair_value is None:
+                continue
+
+            product_type = product.id.split(",")[1]
+
+            if product_type == "F":
+                half_spread = future_half_spread
+
+            elif product_type in {"C", "P"}:
+                half_spread = max(0.25, fair_value * 0.25)
+
+            else:
+                continue
             # Get your current position in this product
             position = my_trades.get_position(product.id)
-
             numeric_position = 0
+
             if position is not None:
-                # position.trades: list of trades, each has attributes buyer_id, seller_id, price, 
-                # round_traded, quantity (quantity is 1 if buying, -1 if selling)
-                trades = position.trades
-
-                # position.position: net position, positive if long, negative if short
                 numeric_position = position.position
+                
+            skew_per_unit = half_spread * 0.02
+            skew = skew_per_unit * (numeric_position * -1)
 
-            if fair_value is not None:
-                if product.id.split(",")[1] in ['C','P']:
-                    half_spread = 10
-                else:
-                    # Create bid/ask spread around fair value
-                    # Skew quotes to manage positions (sell if long, buy if short)
-                    fair_value += (self.spread_width / 10) * (numeric_position * -1)
-                    half_spread = self.spread_width / 2.0
-                    
-                bid = max(0.1, fair_value - half_spread)
-                ask = fair_value + half_spread
+            max_skew = half_spread * 0.9
+            skew = max(-max_skew, min(max_skew, skew))
 
+            skewed_fv = fair_value + skew
 
-                # Add to quotes dictionary
-                quotes[product.id] = (bid, ask)
+            bid = max(0.1, skewed_fv - half_spread)
+            ask = skewed_fv + half_spread
+
+            quotes[product.id] = (bid, ask)
 
         return quotes
     
-    def _update_spread(self, training_rolls, current_rolls) -> float:
-        z_score = 1.645
-        return z_score * self._calculate_standard_error_of_mean(training_rolls, current_rolls)
-    
-    def _calculate_expected_roll_value(self, training_rolls, current_rolls, current_sub_round: int) -> float:
-        """Calculate expected value of a single dice roll."""
+    def _get_roll_distribution_params(self, training_rolls, current_rolls, current_sub_round: int) -> Tuple[float, float]:
         if current_sub_round == 10:
             all_rolls = list(current_rolls)
-
         else:
             all_rolls = list(training_rolls) + list(current_rolls)
-            
-        if not all_rolls:
-            # No data available, use theoretical expected value
-            return (1 + self.dice_sides) / 2.0
         
-        # Calculate empirical expected value
-        return np.mean(all_rolls)
+        if not all_rolls:
+            mean = (1 + self.dice_sides) / 2.0
+            std_dev = np.sqrt(((self.dice_sides - 1 + 1) ** 2 - 1) / 12)
+
+            return mean, std_dev
+        
+        return np.mean(all_rolls), np.std(all_rolls)
     
-    def _calculate_fair_value(self, product, expected_value_per_roll: float) -> float:
+    def _calculate_fair_value(self, product, expected_total_sum: float, std_dev_total_sum: float) -> float:
         """Calculate fair value for a product."""
         try:
             data = product.id.split(",")
+            product_type = data[1]
             
-            if data[1] == "F":  # Future
-                settlement_round = int(data[2])
-                # Future settles to sum of first settlement_round dice rolls
-                fair_value = expected_value_per_roll * settlement_round * 2_000
-                return fair_value
+            if product_type == "F":  # Future
+                return expected_total_sum
                 
-            elif data[1] in ["C", "P"]:  # Options
-                strike_price = float(data[2])
-                expiry_round = int(data[3])
+            elif data[1] in {"C", "P"}:  # Options
+                strike_price = float(data[3])
                 
-                # Expected sum at expiry
-                expected_sum_at_expiry = expected_value_per_roll * expiry_round * 2_000
+                if product_type == "C":
+                    return self._price_call(
+                        S=expected_total_sum,
+                        K=strike_price,
+                        sigma=std_dev_total_sum
+                    )
                 
-                if data[1] == "C":  # Call option
-                    # Call value = max(0, expected_sum - strike)
-                    fair_value = max(0, expected_sum_at_expiry - strike_price)
-                else:  # Put option  
-                    # Put value = max(0, strike - expected_sum)
-                    fair_value = max(0, strike_price - expected_sum_at_expiry)
-                
-                return fair_value
+                else:
+                    return self._price_put(
+                        S=expected_total_sum,
+                        K=strike_price,
+                        sigma=std_dev_total_sum
+                    )
                 
         except (ValueError, IndexError):
             # Malformed product ID
             return None
             
         return None
-    
-    def _calculate_standard_error_of_mean(self, training_rolls, current_rolls):
+      
+    def _price_call(self, S: float, K: float, sigma: float) -> float:
+        if sigma == 0:
+            return max(0.0, S - K)
         
-        all_rolls = list(training_rolls) + list(current_rolls)
-        
-        if not all_rolls:
-            # No data available, use approximate standard error of mean for discrete uniform distribution
-            return np.sqrt(len(all_rolls)) / 3.46
-        
-        # Calculate empirical standard error of mean
-        return np.std(all_rolls) / np.sqrt(len(all_rolls))
-        
+        d = (S - K) / sigma
+        return (S - K) * norm.cdf(d) + sigma * norm.pdf(d)
+
+    def _price_put(self, S: float, K: float, sigma: float) -> float:
+        if sigma == 0:
+            return max(0.0, K - S)
+            
+        d = (S - K) / sigma
+        return (K - S) * norm.cdf(-d) + sigma * norm.pdf(-d)
     
     def on_round_end(self, result: Dict[str, Any]) -> None:
         """Handle end of round printing for personal debugging."""
