@@ -117,7 +117,7 @@ class MyTradingStrategy(AbstractTradingStrategy):
         return quotes
     
     def _update_spread(self, current_sub_round: int, training_rolls, current_rolls) -> float:
-        z_score = 1.28 + current_sub_round / 14
+        z_score = 1.645
         return z_score * self._calculate_standard_error_of_mean(training_rolls, current_rolls)
     
     def _calculate_expected_roll_value(self, training_rolls, current_rolls, current_sub_round: int) -> float:
